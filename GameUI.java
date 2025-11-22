@@ -1,15 +1,19 @@
-// Implements Strategy (Renderer) AND Observer (GameObserver)
+/**
+ * Handles the display of game information.
+ * Uses the Strategy Pattern for rendering (allowing easy swap between Console/GUI)
+ * and implements GameObserver to receive updates from the Engine.
+ */
 public class GameUI implements GameObserver {
     private int currentLevel;
     private int displayedScore;
     private String message = "";
 
-    // Strategy Pattern Interface
+    // --- Strategy Pattern Interface ---
     public interface Renderer {
         void draw(int level, int score, String msg);
     }
 
-    // Concrete Strategy
+    // --- Concrete Strategy: Console Output ---
     public static final class ConsoleRenderer implements Renderer {
         @Override
         public void draw(int level, int score, String msg) {
@@ -23,6 +27,7 @@ public class GameUI implements GameObserver {
 
     private final Renderer renderer;
 
+    // Default constructor uses ConsoleRenderer
     public GameUI() {
         this(new ConsoleRenderer());
     }
@@ -33,6 +38,7 @@ public class GameUI implements GameObserver {
     }
 
     // --- GameObserver Implementation ---
+    // These methods are called automatically by GameEngine when state changes.
 
     @Override
     public void onLevelChanged(int level) {
