@@ -1,236 +1,142 @@
-// This ensures the PulseSensor library uses hardware interrupts for accurate reading
-#define USE_ARDUINO_INTERRUPTS true
-#include <PulseSensorPlayground.h>
 #include <SoftwareSerial.h>
 
-// ---------------------------------------------------------------------------
-// HARDWARE PIN DEFINITIONS
-// ---------------------------------------------------------------------------
-const int PULSE_PIN = A0;       // Heart Rate Sensor Analog Input
-const int ACC_X_PIN = A1;       // Accelerometer X-Axis
-const int ACC_Y_PIN = A2;       // Accelerometer Y-Axis
-const int ACC_Z_PIN = A3;       // Accelerometer Z-Axis
-const int BUTTON_PIN = 12;      // Push Button (Active LOW)
-const int ZIGBEE_RX = 10;       // ZigBee Receive Pin
-const int ZIGBEE_TX = 11;       // ZigBee Transmit Pin
+// ---------- ZigBee serial config ----------
+static const uint8_t XBEE_RX   = 11;   // D11 = RX (from ZigBee)
+static const uint8_t XBEE_TX   = 12;   // D12 = TX (to ZigBee)
+static const long    XBEE_BAUD = 9600;
 
-// ---------------------------------------------------------------------------
-// CONFIGURATION THRESHOLDS
-// These determine how hard the player has to work to get bonuses.
-// ---------------------------------------------------------------------------
-const int HR_THRESHOLD_BPM = 120;       // BPM required to trigger the Heart Rate Bonus
-const int PULSE_THRESHOLD = 545;        // Signal strength required to count a valid heartbeat
-const int ACC_THRESHOLD_RAW = 125;      // Raw analog difference required to trigger Speed Bonus
-// We calculate the squared threshold once here to avoid expensive sqrt() math later
-const long ACC_THRESHOLD_SQ = (long) ACC_THRESHOLD_RAW * (long) ACC_THRESHOLD_RAW;
+SoftwareSerial ZigBee(XBEE_RX, XBEE_TX);
 
-const unsigned long BUTTON_DEBOUNCE_MS = 50; // Time to wait to ensure button press is real
+// ---------- Hardware pins ----------
+static const uint8_t LED_PINS[6] = {5, 6, 7, 8, 9, 10}; // D5..D10
+static const uint8_t PAD_PINS[6] = {A0, A1, A2, A3, A4, A5};
 
-// ---------------------------------------------------------------------------
-// COMMUNICATION PROTOCOL
-// Definitions for bits used in the byte sent to Java.
-// ---------------------------------------------------------------------------
-const byte ARDUINO2_ID_BIT = 0x80;      // Bit 7: Identifies this message comes from Arduino 2
-const byte HR_BONUS_BIT    = 0x01;      // Bit 0: Flag for Heart Rate Bonus
-const byte ACC_BONUS_BIT   = 0x02;      // Bit 1: Flag for Speed/Acceleration Bonus
-const byte START_GAME_BIT  = 0x08;      // Bit 3: Flag for Start Button Press
+// ---------- Pad analog thresholds ----------
+static const int      PRESS_THRESHOLD = 450; // >= pressed (tune if needed)
+static const int      HYSTERESIS      = 30;  // helps with chatter
+static const uint16_t DEBOUNCE_MS     = 25;
 
-// Commands received FROM Java
-const byte CMD_START_TRACKING = 0x81;   // Java says: "Level Started, track sensors"
-const byte CMD_ABORT_IDLE     = 0x82;   // Java says: "Game Over/Reset, stop tracking"
-const byte CMD_REPORT_BONUS   = 0x83;   // Java says: "Level Passed, did we get bonuses?"
+// ---------- Protocol command bytes ----------
+static const uint8_t CMD_START_PAD_REPORT = 0x00; // enter PAD_REPORTING
+static const uint8_t CMD_STOP_PAD_REPORT  = 0x40; // leave PAD_REPORTING, wait for LEDs
 
-// ---------------------------------------------------------------------------
-// SYSTEM STATE
-// ---------------------------------------------------------------------------
-enum State {
-  IDLE_WAITING,   // Waiting for game start or between levels
-  ACTIVE_TRACKING // Currently playing a level (monitoring sensors)
-};
-State currentState = IDLE_WAITING;
+// ---------- Mode ----------
+enum Mode { WAIT_LED_COMMAND, PAD_REPORTING };
+Mode mode = WAIT_LED_COMMAND;
 
-// ---------------------------------------------------------------------------
-// GLOBAL OBJECTS & VARIABLES
-// ---------------------------------------------------------------------------
-PulseSensorPlayground pulseSensor;
-SoftwareSerial zigbee(ZIGBEE_RX, ZIGBEE_TX);
+// ---------- Per-pad state ----------
+bool     pressed[6]    = {false, false, false, false, false, false};
+uint32_t lastEdgeMs[6] = {0, 0, 0, 0, 0, 0};
 
-// Calibration offsets for the accelerometer (determined at startup)
-int accBaseX = 0, accBaseY = 0, accBaseZ = 0;
+// ---------- LED helpers (active-LOW) ----------
+inline void ledOn(uint8_t pin)  { digitalWrite(pin, LOW); }
+inline void ledOff(uint8_t pin) { digitalWrite(pin, HIGH); }
 
-// Flags to track if bonuses were achieved during the current level
-bool hrLatched = false;
-bool accLatched = false;
-
-// Counter to filter out momentary noise in accelerometer readings
-int accConfidenceCount = 0; 
-
-// Variables for Button Debouncing logic
-bool gameStartSent = false;
-bool buttonStableState = HIGH;
-bool lastButtonRawState = HIGH;
-unsigned long lastButtonChangeMs = 0;
-
-// ---------------------------------------------------------------------------
-// HELPER: CALIBRATE ACCELEROMETER
-// Reads the accelerometer while stationary to find the "Zero G" reference point.
-// ---------------------------------------------------------------------------
-void calibrateAccelerometer() {
-  long sumX = 0, sumY = 0, sumZ = 0;
-  // Take 50 samples to get an average baseline
-  for (int i=0; i<50; i++) {
-    sumX += analogRead(ACC_X_PIN);
-    sumY += analogRead(ACC_Y_PIN);
-    sumZ += analogRead(ACC_Z_PIN);
-    delay(5);
-  }
-  accBaseX = sumX / 50;
-  accBaseY = sumY / 50;
-  accBaseZ = sumZ / 50;
-}
-
-// ---------------------------------------------------------------------------
-// SETUP
-// ---------------------------------------------------------------------------
-void setup() {
-  // Initialize serial communication with XBee/ZigBee module
-  zigbee.begin(9600);
-
-  // Configure Pulse Sensor
-  pulseSensor.analogInput(PULSE_PIN);
-  pulseSensor.setThreshold(PULSE_THRESHOLD);
-  pulseSensor.begin();
-
-  // Run calibration routine
-  calibrateAccelerometer();
-
-  // Configure Button with internal pull-up resistor
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  buttonStableState = digitalRead(BUTTON_PIN);
-  lastButtonRawState = buttonStableState;
-  lastButtonChangeMs = millis();
-}
-
-// ---------------------------------------------------------------------------
-// HELPER: CALCULATE ACCELERATION
-// Returns the magnitude squared of the current acceleration vector.
-// Using squared values avoids slow square root calculations.
-// ---------------------------------------------------------------------------
-long getAccelMagnitudeSq() {
-  int dx = analogRead(ACC_X_PIN) - accBaseX;
-  int dy = analogRead(ACC_Y_PIN) - accBaseY;
-  int dz = analogRead(ACC_Z_PIN) - accBaseZ;
-  return (long)dx*dx + (long)dy*dy + (long)dz*dz;
-}
-
-// ---------------------------------------------------------------------------
-// COMMAND LISTENER
-// Checks for incoming bytes from the Java Game Engine via ZigBee.
-// ---------------------------------------------------------------------------
-void checkForCommands() {
-  while (zigbee.available() > 0) {
-    byte incoming = zigbee.read();
-
-    if (incoming == CMD_START_TRACKING) {
-      // Java signals level start: Enable tracking and reset bonus flags
-      currentState = ACTIVE_TRACKING;
-      hrLatched = false;
-      accLatched = false;
-      accConfidenceCount = 0;
-      gameStartSent = false;
-    }
-    else if (incoming == CMD_ABORT_IDLE) {
-      // Java signals reset/game over: Stop tracking
-      currentState = IDLE_WAITING;
-    }
-    else if (incoming == CMD_REPORT_BONUS) {
-      // Java asks for results: Stop tracking and send the report
-      currentState = IDLE_WAITING;
-
-      byte report = ARDUINO2_ID_BIT; // Start with ID bit (1xxxxxxx)
-      if (hrLatched) report |= HR_BONUS_BIT;   // Add HR bit if earned
-      if (accLatched) report |= ACC_BONUS_BIT; // Add Accel bit if earned
-
-      zigbee.write(report); // Send single byte response
-    }
+void allLedsOff() {
+  for (uint8_t i = 0; i < 6; i++) {
+    ledOff(LED_PINS[i]);
   }
 }
 
-// ---------------------------------------------------------------------------
-// BUTTON HANDLER
-// Checks if the start button is pressed (with debouncing) to begin the game.
-// ---------------------------------------------------------------------------
-void checkStartButton() {
-  // Only allow starting the game if we are currently IDLE
-  if (currentState != IDLE_WAITING) return;
-
-  unsigned long now = millis();
-  bool rawState = digitalRead(BUTTON_PIN);
-
-  // If state changed, reset timer
-  if (rawState != lastButtonRawState) {
-    lastButtonRawState = rawState;
-    lastButtonChangeMs = now;
-  }
-
-  // If state is stable for DEBOUNCE_MS
-  if ((now - lastButtonChangeMs) > BUTTON_DEBOUNCE_MS) {
-    if (rawState != buttonStableState) {
-      buttonStableState = rawState;
-      
-      // If button is pressed (LOW) and we haven't sent the start command yet
-      if (buttonStableState == LOW && !gameStartSent) {
-        byte msg = ARDUINO2_ID_BIT | START_GAME_BIT;
-        zigbee.write(msg);
-        gameStartSent = true; // Prevent spamming the start command
-      }
-    }
-  }
+// Return true if exactly one bit set among the low 6 bits
+bool isOneHot6(uint8_t b) {
+  uint8_t m = b & 0x3F;               // only bits 0..5
+  return (m != 0) && ((m & (m - 1)) == 0);
 }
 
-// ---------------------------------------------------------------------------
-// SENSOR LOGIC
-// Reads sensors and updates bonus flags if thresholds are exceeded.
-// ---------------------------------------------------------------------------
-void updateSensors() {
-  // Do not process sensors if the game isn't running a level
-  if (currentState != ACTIVE_TRACKING) return;
-
-  // --- HEART RATE LOGIC ---
-  int bpm = pulseSensor.getBeatsPerMinute();
-  // Check if BPM is above our difficulty threshold
-  // We verify < 220 to filter out glitchy/impossible readings
-  if (bpm > HR_THRESHOLD_BPM && bpm < 220) {
-    hrLatched = true; // Mark bonus as earned for this level
-  }
-
-  // --- ACCELEROMETER LOGIC ---
-  if (!accLatched) {
-    long currentMag = getAccelMagnitudeSq();
-    
-    // Check if movement intensity exceeds threshold
-    if (currentMag > ACC_THRESHOLD_SQ) {
-      // Increase confidence counter to filter out single noise spikes
-      accConfidenceCount++;
-      
-      // Require 3 consecutive checks (approx 15ms) to confirm intent
-      if (accConfidenceCount >= 3) {
-        accLatched = true; // Mark bonus as earned
-      }
-    } else {
-      // Reset counter if movement stops
-      accConfidenceCount = 0;
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// MAIN LOOP
-// ---------------------------------------------------------------------------
-void loop() {
-  checkForCommands();   // 1. Check ZigBee
-  checkStartButton();   // 2. Check Button
-  updateSensors();      // 3. Read Sensors
+// Light exactly one LED per one-hot mask (bits 0..5).
+void applyLedMask(uint8_t mask6) {
+  uint8_t m = mask6 & 0x3F;
+  if (!isOneHot6(m)) return;
   
-  delay(5);             // Short delay for stability
+  allLedsOff();
+  for (uint8_t i = 0; i < 6; i++) {
+    if (m & (1 << i)) {
+      ledOn(LED_PINS[i]);  // exactly one LED
+      break;
+    }
+  }
+}
+
+// Read pads, update pressed[], return 6-bit mask & whether anything changed.
+uint8_t readPads(bool &changed) {
+  changed = false;
+  uint8_t  mask = 0;
+  uint32_t now  = millis();
+  
+  for (uint8_t i = 0; i < 6; i++) {
+    int  v   = analogRead(PAD_PINS[i]);
+    bool cur = pressed[i];
+    bool next;
+    
+    // Hysteresis logic
+    if (!cur) next = (v >= PRESS_THRESHOLD);
+    else      next = (v >= (PRESS_THRESHOLD - HYSTERESIS));
+    
+    if (next != cur && (now - lastEdgeMs[i] >= DEBOUNCE_MS)) {
+      pressed[i]    = next;
+      lastEdgeMs[i] = now;
+      changed       = true;
+    }
+    
+    if (pressed[i]) {
+      mask |= (1 << i);
+    }
+  }
+  return mask;
+}
+
+void setup() {
+  // LEDs
+  for (uint8_t i = 0; i < 6; i++) {
+    pinMode(LED_PINS[i], OUTPUT);
+    ledOff(LED_PINS[i]);
+  }
+  // Pads
+  for (uint8_t i = 0; i < 6; i++) {
+    pinMode(PAD_PINS[i], INPUT); 
+  }
+  
+  ZigBee.begin(XBEE_BAUD);
+}
+
+void loop() {
+  // ---------- Handle inbound bytes (non-blocking) ----------
+  while (ZigBee.available()) {
+    uint8_t b = ZigBee.read();
+    
+    // Ignore messages intended for Arduino 2 (MSB = 1)
+    if (b & 0x80) continue;
+
+    // 1) Mode control commands
+    if (b == CMD_STOP_PAD_REPORT) {
+      mode = WAIT_LED_COMMAND;
+      allLedsOff();
+      continue;
+    }
+    if (b == CMD_START_PAD_REPORT) {
+      mode = PAD_REPORTING;
+      allLedsOff();
+      continue;
+    }
+    
+    // 2) LED command (one-hot in bits 0..5)
+    if (isOneHot6(b)) {
+      mode = WAIT_LED_COMMAND; 
+      applyLedMask(b);
+    }
+  }
+
+  // ---------- In PAD_REPORTING mode, watch pads ----------
+  if (mode == PAD_REPORTING) {
+    bool    changed = false;
+    uint8_t mask    = readPads(changed);
+    
+    if (changed) {
+      // Ensure MSB remains 0 (only bits 0..5 used)
+      ZigBee.write(mask & 0x3F);
+    }
+  }
+  
+  delay(1);
 }
