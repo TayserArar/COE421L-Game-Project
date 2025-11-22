@@ -1,9 +1,9 @@
 import java.util.*;
 
 /**
- * The "Brain" of the application.
- * Manages game states, level progression, sequence generation,
- * input validation, and hardware communication logic.
+ * The core engine of the application.
+ * Responsible for managing game states, level progression, sequence generation,
+ * input validation, and communication with hardware components.
  */
 public class GameEngine {
 
@@ -18,13 +18,13 @@ public class GameEngine {
     private boolean gameActive;
     private int totalScore;
     
-    // --- Protocol Commands (Must match Arduino Code) ---
-    private static final byte CMD_ARDUINO1_START_PADS = (byte) 0x00; // Tell Floor to read inputs
-    private static final byte CMD_ARDUINO1_STOP_PADS  = (byte) 0x40; // Tell Floor to stop inputs (LED mode)
+    // Protocol Commands (Must align with Arduino firmware)
+    private static final byte CMD_ARDUINO1_START_PADS = (byte) 0x00; // Command: Start reading floor inputs
+    private static final byte CMD_ARDUINO1_STOP_PADS  = (byte) 0x40; // Command: Stop inputs, switch to LED mode
     
-    private static final byte CMD_ARDUINO2_START_TRACKING = (byte) 0x81; // Tell Wearable to start sensing
-    private static final byte CMD_ARDUINO2_ABORT_IDLE     = (byte) 0x82; // Tell Wearable to reset
-    private static final byte CMD_ARDUINO2_REPORT_BONUS   = (byte) 0x83; // Ask Wearable for bonus results
+    private static final byte CMD_ARDUINO2_START_TRACKING = (byte) 0x81; // Command: Start sensor tracking
+    private static final byte CMD_ARDUINO2_ABORT_IDLE     = (byte) 0x82; // Command: Reset wearable state
+    private static final byte CMD_ARDUINO2_REPORT_BONUS   = (byte) 0x83; // Command: Request bonus report
 
     public GameEngine(SerialPortHandle serial) {
         this.serial = serial;
@@ -36,7 +36,7 @@ public class GameEngine {
         this.totalScore = 0;
     }
 
-    // --- Observer Pattern Methods (UI Updates) ---
+    // Observer Pattern Methods for UI Updates
     public void addObserver(GameObserver o) { observers.add(o); }
     private void notifyMessage(String msg) { for (GameObserver o: observers) o.onMessage(msg); }
     private void notifyLevel(int level) { for (GameObserver o: observers) o.onLevelChanged(level); }
@@ -45,18 +45,20 @@ public class GameEngine {
 
     /**
      * Initializes the game session.
-     * Resets score, level, and hardware state before starting Level 1.
+     * Resets score, level, and hardware state before commencing Level 1.
      */
     public void startGame() {
         currentLevel = 1;
         totalScore = 0;
         gameActive = true;
 
-        notifyLevel(currentLevel);
-        notifyScore(totalScore);
+        // Notify UI first to clear any waiting messages
         notifyMessage("Get Ready...");
         
-        // Ensure hardware is in a clean state (LEDs off, Wearable Idle)
+        notifyLevel(currentLevel);
+        notifyScore(totalScore);
+        
+        // Ensure hardware is in a clean, idle state
         serial.writeByte(CMD_ARDUINO1_STOP_PADS); 
         try { Thread.sleep(50); } catch (Exception e) {}
         serial.writeByte(CMD_ARDUINO2_ABORT_IDLE);
@@ -66,10 +68,8 @@ public class GameEngine {
     }
 
     /**
-     * Logic for playing a single level.
-     * 1. Generates a sequence.
-     * 2. Plays the sequence on LEDs.
-     * 3. Waits for player input.
+     * Executes the logic for a single game level.
+     * Sequence: Generate -> Display (LEDs) -> Countdown -> Input Phase.
      */
     private void nextLevel() {
         if (!gameActive) return;
@@ -80,49 +80,45 @@ public class GameEngine {
         try {
             Thread.sleep(1000);
 
-            // --- Phase 1: Play Sequence (Output to LEDs) ---
+            // Phase 1: Play Sequence on Floor Tiles
             for (int tile: sequence) {
                 SoundManager.play("beep.wav"); 
-                // Send command to light specific tile
                 serial.writeByte(ArduinoMessage.encodeTileOn(tile));
                 Thread.sleep(1000); 
-                // Turn off LEDs
                 serial.writeByte(CMD_ARDUINO1_STOP_PADS); 
                 Thread.sleep(200); 
             }
             
-            // --- Phase 2: Countdown & Enable Input ---
+            // Phase 2: Countdown & Input Activation
             notifyMessage("Prepare..."); 
-            // Blocking call: Pauses code until "Go" sound finishes
-            SoundManager.playBlocking("go.wav"); 
+            SoundManager.playBlocking("go.wav"); // Wait for audio completion
 
             notifyMessage("GO!");
             
-            // Enable Pad Sensors (Arduino 1)
+            // Activate Sensors
             serial.writeByte(CMD_ARDUINO1_START_PADS);
             try { Thread.sleep(20); } catch (Exception e) {}
-            // Enable Wearable Sensors (Arduino 2)
             serial.writeByte(CMD_ARDUINO2_START_TRACKING);
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
 
-        // Start timer for scoring
+        // Begin timing for score calculation
         playerStats.startTracking();
         waitForPlayerInput();
     }
 
     /**
-     * Generates a random sequence of tiles.
-     * Difficulty Curve:
-     * - Level 1-2: Uses Tiles 2-5 (Middle 4)
-     * - Level 3-4: Unlocks Tile 1
-     * - Level 5+: Unlocks Tile 6
+     * Generates a randomized sequence of tiles appropriate for the current level.
+     * * Difficulty Progression:
+     * - Levels 1-2: Tiles 2-5 only.
+     * - Levels 3-4: Tile 1 unlocked.
+     * - Levels 5+: Tile 6 unlocked.
      */
     public void generateSequence(int level) {
         sequence.clear();
-        int seqLength = 3 + (level - 1); // Sequence gets longer every level
+        int seqLength = 3 + (level - 1); // Sequence length increases with level
         int lastPad = -1; 
         
         for (int i = 0; i < seqLength; i++) {
@@ -137,7 +133,7 @@ public class GameEngine {
                 else {
                     pad = random.nextInt(6) + 1; 
                 }
-            } while (pad == lastPad); // Prevent same tile twice in a row
+            } while (pad == lastPad); // Prevent immediate repetition
             lastPad = pad;
             sequence.add(pad);
         }
@@ -145,7 +141,7 @@ public class GameEngine {
 
     /**
      * Main Input Loop.
-     * Reads serial bytes continuously to check if player steps on correct tiles.
+     * Monitors serial input for floor tile presses and validates against the sequence.
      */
     private void waitForPlayerInput() {
         List<Integer> playerInput = new ArrayList<>();
@@ -160,20 +156,18 @@ public class GameEngine {
             try {
                 ArduinoMessage msg = ArduinoMessage.parse((byte) raw);
 
-                // We only care about Floor Tile inputs here
+                // Process Floor Tile Inputs
                 if (msg.getSource() == ArduinoMessage.Source.ARDUINO_1) {
                     int mask = msg.getPressedTilesMask6();
                     int currentIndex = playerInput.size();
                     int expectedTile = sequence.get(currentIndex); 
                     
-                    // Check if the expected tile bit is set in the mask
                     boolean isExpectedPressed = ((mask >> (expectedTile - 1)) & 1) == 1;
 
                     if (isExpectedPressed) {
-                        // CORRECT STEP
+                        // Valid Step
                         playerInput.add(expectedTile);
                         
-                        // If sequence complete, Level Pass
                         if (playerInput.size() == sequence.size()) {
                             playerStats.endLevel();
                             handleLevelPass();
@@ -181,10 +175,9 @@ public class GameEngine {
                         }
                     } 
                     else {
-                        // INCORRECT STEP LOGIC
-                        if (mask == 0) continue; // Ignore if feet are in the air
+                        // Ignore empty masks or lingering inputs
+                        if (mask == 0) continue; 
 
-                        // Ignore "lingering" inputs (if user is still stepping off previous tile)
                         boolean isSafeIgnore = false;
                         if (currentIndex > 0) {
                             int previousTile = sequence.get(currentIndex - 1);
@@ -195,7 +188,7 @@ public class GameEngine {
                         if (isSafeIgnore) {
                             continue;
                         } else {
-                            // Actual wrong step detected
+                            // Invalid Step Detected
                             handleLevelFail();
                             return;
                         }
@@ -206,16 +199,16 @@ public class GameEngine {
     }
 
     /**
-     * Called when player completes a sequence correctly.
-     * Handles fetching bonus data from Wearable, calculating score, and advancing level.
+     * Handles successful level completion.
+     * Retrieves bonus data, calculates score, and transitions to the next level.
      */
     private void handleLevelPass() {
-        serial.writeByte(CMD_ARDUINO1_STOP_PADS); // Turn off pads
-        while(serial.readRawByte() != -1) {} // Flush junk data from buffer
+        serial.writeByte(CMD_ARDUINO1_STOP_PADS); // Disable floor inputs
+        while(serial.readRawByte() != -1) {} // Flush serial buffer
 
         boolean reportReceived = false;
         
-        // RETRY LOGIC: Try 3 times to get the bonus report from the wearable
+        // Attempt to retrieve bonus report from wearable (3 retries)
         for (int attempt = 1; attempt <= 3; attempt++) {
             if (reportReceived) break;
 
@@ -228,18 +221,29 @@ public class GameEngine {
                 if (raw != -1) {
                     try {
                         ArduinoMessage msg = ArduinoMessage.parse((byte) raw);
-                        // Check if we received the specific Bonus Report message
+                        
                         if (msg.getSource() == ArduinoMessage.Source.ARDUINO_2 && msg.isBonusReport()) {
+                            
+                            // Build Bonus Message
+                            StringBuilder bonusMsg = new StringBuilder("Bonus: ");
+                            boolean gotBonus = false;
+
                             if (msg.isHrExceeded()) {
                                 playerStats.markHrBonusHit();
-                                notifyMessage("Bonus: Heart Rate!");
-                                Thread.sleep(1000); 
+                                bonusMsg.append("HR (+").append(ScoringSystem.HR_BONUS_POINTS).append(") ");
+                                gotBonus = true;
                             }
                             if (msg.isAccelExceeded()) {
                                 playerStats.markAccelBonusHit();
-                                notifyMessage("Bonus: Speed!");
-                                Thread.sleep(1000);
+                                bonusMsg.append("SPEED (+").append(ScoringSystem.ACCEL_BONUS_POINTS).append(") ");
+                                gotBonus = true;
                             }
+
+                            if (gotBonus) {
+                                notifyMessage(bonusMsg.toString().trim());
+                                Thread.sleep(2000); // Display duration
+                            }
+
                             reportReceived = true;
                             break; 
                         }
@@ -249,7 +253,7 @@ public class GameEngine {
             }
         }
 
-        // Calculate and apply score
+        // Score Calculation
         int levelScore = scoring.scorePassedLevel(currentLevel, playerStats);
         totalScore += levelScore;
         
@@ -259,15 +263,15 @@ public class GameEngine {
 
         try { Thread.sleep(2000); } catch (InterruptedException e) {}
 
-        // Advance to next level (Infinite Mode)
+        // Advance Level
         currentLevel++;
         notifyLevel(currentLevel);
         nextLevel();
     }
 
     /**
-     * Called when player makes a mistake.
-     * Resets hardware and ends the game session.
+     * Handles level failure.
+     * Stops hardware and ends the game session.
      */
     private void handleLevelFail() {
         serial.writeByte(CMD_ARDUINO2_ABORT_IDLE); 
@@ -283,7 +287,7 @@ public class GameEngine {
 
     public void endGame() {
         gameActive = false;
-        // Ensure everything is turned off
+        // Reset hardware states
         serial.writeByte(CMD_ARDUINO1_STOP_PADS); 
         serial.writeByte(CMD_ARDUINO2_ABORT_IDLE);
         notifyGameEnd(totalScore);

@@ -2,8 +2,8 @@ import jssc.SerialPort;
 import jssc.SerialPortException;
 
 /**
- * Wrapper class for the JSSC (Java Simple Serial Connector) library.
- * Manages opening/closing the COM port and reading/writing raw bytes.
+ * Wrapper for the JSSC library to manage serial communication.
+ * Handles port opening, configuration, and data transfer.
  */
 public class SerialPortHandle {
     SerialPort sp;
@@ -14,10 +14,8 @@ public class SerialPortHandle {
         this.path = path;
         try {
             sp.openPort();
-            // Set Params: 9600 Baud, 8 Data bits, 1 Stop bit, No Parity
             sp.setParams(9600, 8, 1, 0);
-            
-            // Safe flush: Clear any old data sitting in the buffer on startup
+            // Clear buffer on startup
             try {
                  if(sp.getInputBufferBytesCount() > 0) {
                      sp.readBytes(); 
@@ -29,28 +27,20 @@ public class SerialPortHandle {
         } 
     }
 
-    /**
-     * Reads a single byte from the serial port.
-     * This method is non-blocking for the most part, returning -1 if no data is available.
-     * It handles the 0xFF masking to ensure correct integer values.
-     */
     public int readRawByte() {
         try {
             if (sp.getInputBufferBytesCount() > 0) {
                 byte[] buffer = sp.readBytes(1);
                 if (buffer != null && buffer.length > 0) {
-                    return buffer[0] & 0xFF; // Mask to unsigned int
+                    return buffer[0] & 0xFF; 
                 }
             }
         } catch (SerialPortException e) {
             e.printStackTrace();
         }
-        return -1; // No data
+        return -1; 
     }
 
-    /**
-     * Sends a single byte to the serial port.
-     */
     public void writeByte(byte b) {
         try {
             sp.writeByte(b);
@@ -59,7 +49,6 @@ public class SerialPortHandle {
         }
     }
     
-    // Helper to send strings (useful for debugging, mostly unused in protocol)
     public void printLine(String s) {
         try {
             sp.writeBytes(s.getBytes());

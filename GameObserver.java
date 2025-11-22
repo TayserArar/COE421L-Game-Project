@@ -1,7 +1,6 @@
 /**
- * Interface for the Observer Pattern.
- * Allows the GameEngine to send updates (Score, Level, Messages)
- * to any listening UI class without being tightly coupled to it.
+ * Interface for observing game events.
+ * Decouples the GameEngine from the UI implementation.
  */
 public interface GameObserver {
     void onLevelChanged(int level);

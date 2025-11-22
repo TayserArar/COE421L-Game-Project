@@ -2,14 +2,14 @@ import javax.sound.sampled.*;
 import java.io.File;
 
 /**
- * Utility class for playing .wav audio files.
- * Supports both asynchronous (non-blocking) and synchronous (blocking) playback.
+ * Utility for playing WAV audio files.
+ * Supports both asynchronous (non-blocking) and synchronous (blocking) playback modes.
  */
 public class SoundManager {
 
     /**
-     * Standard Play: Plays a sound in a new thread.
-     * Does NOT pause the game execution. Used for UI sounds, steps, etc.
+     * Plays a sound asynchronously in a background thread.
+     * Does not pause program execution.
      */
     public static void play(String fileName) {
         new Thread(() -> {
@@ -22,7 +22,6 @@ public class SoundManager {
                 clip.open(audioIn);
                 clip.start();
                 
-                // Add listener to release resources when sound finishes
                 clip.addLineListener(e -> {
                     if (e.getType() == LineEvent.Type.STOP) {
                         clip.close();
@@ -35,9 +34,8 @@ public class SoundManager {
     }
 
     /**
-     * Blocking Play: Pauses the calling thread until the sound finishes.
-     * Used for critical game flow sounds like the "Go" countdown where
-     * the game logic must wait for the audio to complete.
+     * Plays a sound synchronously, blocking the calling thread until playback completes.
+     * Used for critical timing events (e.g., Countdown).
      */
     public static void playBlocking(String fileName) {
         try {
@@ -52,11 +50,9 @@ public class SoundManager {
             clip.open(audioIn);
             clip.start();
 
-            // Calculate duration in milliseconds
             long durationMs = clip.getMicrosecondLength() / 1000;
             
-            // Sleep the thread for the exact duration of the sound
-            Thread.sleep(durationMs + 50); // +50ms buffer to be safe
+            Thread.sleep(durationMs + 50); 
 
             clip.close();
             audioIn.close();
